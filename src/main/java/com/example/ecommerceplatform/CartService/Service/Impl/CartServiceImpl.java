@@ -2,6 +2,7 @@ package com.example.ecommerceplatform.CartService.Service.Impl;
 
 import com.example.ecommerceplatform.CartService.Client.MerchantServiceClient;
 import com.example.ecommerceplatform.CartService.Client.OrderServiceClient;
+import com.example.ecommerceplatform.CartService.Client.ProductServiceClient;
 import com.example.ecommerceplatform.CartService.Dto.AddCartItemRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemCountResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemResponseDto;
@@ -13,6 +14,7 @@ import com.example.ecommerceplatform.CartService.Dto.request.OrderLineItemReques
 import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemResponse;
 import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemStatus;
 import com.example.ecommerceplatform.CartService.Dto.response.OrderCreatedResponse;
+import com.example.ecommerceplatform.CartService.Dto.response.ProductImageResponse;
 import com.example.ecommerceplatform.CartService.Entity.CartItems;
 import com.example.ecommerceplatform.CartService.Entity.CartStatus;
 import com.example.ecommerceplatform.CartService.Entity.Carts;
@@ -41,6 +43,7 @@ public class CartServiceImpl implements CartService {
     private final CartRepository cartRepository;
     private final CartItemRepository cartItemRepository;
     private final MerchantServiceClient merchantServiceClient;
+    private final ProductServiceClient productServiceClient;
     private final OrderServiceClient orderServiceClient;
 
     @Override
@@ -294,16 +297,22 @@ public class CartServiceImpl implements CartService {
         BigDecimal lineTotal = item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
 
         String productName = "Unavailable";
-        String productImage = null;
         boolean available = false;
         try {
             MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
                     item.getMerchantId(), item.getProductId(), item.getVariantId());
             productName = merchantItem.getProductName();
-            productImage = merchantItem.getProductImage();
             available = merchantItem.getStatus() == MerchantItemStatus.ACTIVE;
         } catch (DownstreamServiceUnavailableException ignored) {
             // Merchant Service is down/unreachable: show the cart with stored data, degrade display fields only.
+        }
+
+        String productImage = null;
+        try {
+            ProductImageResponse image = productServiceClient.getProductImage(item.getVariantId());
+            productImage = image.getImageUrl();
+        } catch (DownstreamServiceUnavailableException ignored) {
+            // Product Service is down/unreachable: leave the image blank, degrade display only.
         }
 
         return CartItemResponseDto.builder()
