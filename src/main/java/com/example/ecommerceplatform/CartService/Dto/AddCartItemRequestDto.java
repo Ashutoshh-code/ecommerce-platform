@@ -1,14 +1,13 @@
 package com.example.ecommerceplatform.CartService.Dto;
 
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
-
-import java.util.UUID;
 
 @Getter
 @Setter
@@ -17,13 +16,14 @@ import java.util.UUID;
 @Builder
 public class AddCartItemRequestDto {
 
-    @NotNull(message = "productId is required")
-    private UUID productId;
+    @NotBlank(message = "productId is required")
+    private String productId;
 
-    private UUID variantId;
+    @NotBlank(message = "variantId is required")
+    private String variantId;
 
-    @NotNull(message = "merchantId is required")
-    private UUID merchantId;
+    @NotBlank(message = "merchantId is required")
+    private String merchantId;
 
     @NotNull(message = "quantity is required")
     @Min(value = 1, message = "quantity must be at least 1")

@@ -32,13 +32,13 @@ public class CartItems {
     private Carts cart;
 
     @Column(name = "product_id", nullable = false)
-    private UUID productId;
+    private String productId;
 
-    @Column(name = "variant_id")
-    private UUID variantId;
+    @Column(name = "variant_id", nullable = false)
+    private String variantId;
 
     @Column(name = "merchant_id", nullable = false)
-    private UUID merchantId;
+    private String merchantId;
 
     @Column(nullable = false)
     private Integer quantity;

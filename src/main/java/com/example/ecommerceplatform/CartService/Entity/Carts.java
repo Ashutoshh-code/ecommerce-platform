@@ -16,10 +16,10 @@ import java.util.UUID;
 public class Carts{
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(name = "cart_id")
+    @Column(name = "cart_id", nullable = false)
     private UUID cartId;
 
-    @Column(name = "user_id")
+    @Column(name = "user_id", nullable = false)
     private UUID userId;
 
     @Enumerated(EnumType.STRING)

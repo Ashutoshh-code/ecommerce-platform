@@ -3,6 +3,8 @@ package com.example.ecommerceplatform.CartService.Controller;
 import com.example.ecommerceplatform.CartService.Dto.AddCartItemRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemCountResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartResponseDto;
+import com.example.ecommerceplatform.CartService.Dto.CheckoutResponseDto;
+import com.example.ecommerceplatform.CartService.Dto.PatchCartItemQuantityRequestDto;
 import com.example.ecommerceplatform.CartService.Service.CartService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +34,15 @@ public class CartController {
         return ResponseEntity.status(HttpStatus.CREATED).body(cartService.addItemToCart(userId, request));
     }
 
+    @PatchMapping("/{userId}/items/{cartItemId}")
+    public ResponseEntity<CartResponseDto> patchItemQuantity(
+            @PathVariable UUID userId,
+            @PathVariable UUID cartItemId,
+            @Valid @RequestBody PatchCartItemQuantityRequestDto request
+    ) {
+        return ResponseEntity.ok(cartService.patchItemQuantity(userId, cartItemId, request));
+    }
+
     @DeleteMapping("/{userId}/items/{cartItemId}")
     public ResponseEntity<CartResponseDto> removeItem(
             @PathVariable UUID userId,
@@ -49,5 +60,10 @@ public class CartController {
     @GetMapping("/{userId}/count")
     public ResponseEntity<CartItemCountResponseDto> getItemCount(@PathVariable UUID userId) {
         return ResponseEntity.ok(cartService.getItemCount(userId));
+    }
+
+    @PostMapping("/{userId}/checkout")
+    public ResponseEntity<CheckoutResponseDto> checkout(@PathVariable UUID userId) {
+        return ResponseEntity.ok(cartService.checkout(userId));
     }
 }

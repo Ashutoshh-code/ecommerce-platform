@@ -1,4 +1,4 @@
-package com.example.ecommerceplatform.CartService.Dto;
+package com.example.ecommerceplatform.CartService.Dto.request;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -7,23 +7,17 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.math.BigDecimal;
-import java.util.UUID;
 
 @Getter
 @Setter
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class CartItemResponseDto {
+public class OrderLineItemRequest {
 
-    private UUID cartItemId;
     private String productId;
     private String variantId;
     private String merchantId;
-
-    private String productName;
-    private String productImage;
-    private boolean available;
 
     private Integer quantity;
     private BigDecimal unitPrice;

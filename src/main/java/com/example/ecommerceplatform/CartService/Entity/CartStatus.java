@@ -2,7 +2,5 @@ package com.example.ecommerceplatform.CartService.Entity;
 
 public enum CartStatus {
     ACTIVE,
-    CHECKED_AT,
-    ABANDONED,
-    EXPIRED
+    CHECKED_OUT
 }

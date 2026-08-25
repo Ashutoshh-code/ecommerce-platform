@@ -34,6 +34,11 @@ public class CartExceptionHandler {
         return build(HttpStatus.CONFLICT, ex.getMessage(), request);
     }
 
+    @ExceptionHandler(EmptyCartException.class)
+    public ResponseEntity<ErrorResponseDto> handleEmptyCart(EmptyCartException ex, HttpServletRequest request) {
+        return build(HttpStatus.BAD_REQUEST, ex.getMessage(), request);
+    }
+
     @ExceptionHandler(DownstreamServiceUnavailableException.class)
     public ResponseEntity<ErrorResponseDto> handleDownstreamUnavailable(DownstreamServiceUnavailableException ex, HttpServletRequest request) {
         return build(HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage(), request);

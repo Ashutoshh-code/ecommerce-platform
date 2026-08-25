@@ -1,19 +1,25 @@
 package com.example.ecommerceplatform.CartService.Service.Impl;
 
 import com.example.ecommerceplatform.CartService.Client.MerchantServiceClient;
-import com.example.ecommerceplatform.CartService.Client.ProductServiceClient;
+import com.example.ecommerceplatform.CartService.Client.OrderServiceClient;
 import com.example.ecommerceplatform.CartService.Dto.AddCartItemRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemCountResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartResponseDto;
-import com.example.ecommerceplatform.CartService.Dto.response.ProductDetailsResponse;
-import com.example.ecommerceplatform.CartService.Dto.response.StockPriceResponse;
+import com.example.ecommerceplatform.CartService.Dto.CheckoutResponseDto;
+import com.example.ecommerceplatform.CartService.Dto.PatchCartItemQuantityRequestDto;
+import com.example.ecommerceplatform.CartService.Dto.request.CreateOrderRequest;
+import com.example.ecommerceplatform.CartService.Dto.request.OrderLineItemRequest;
+import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemResponse;
+import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemStatus;
+import com.example.ecommerceplatform.CartService.Dto.response.OrderCreatedResponse;
 import com.example.ecommerceplatform.CartService.Entity.CartItems;
 import com.example.ecommerceplatform.CartService.Entity.CartStatus;
 import com.example.ecommerceplatform.CartService.Entity.Carts;
 import com.example.ecommerceplatform.CartService.Exception.CartItemNotFoundException;
 import com.example.ecommerceplatform.CartService.Exception.CartNotFoundException;
 import com.example.ecommerceplatform.CartService.Exception.DownstreamServiceUnavailableException;
+import com.example.ecommerceplatform.CartService.Exception.EmptyCartException;
 import com.example.ecommerceplatform.CartService.Exception.InsufficientStockException;
 import com.example.ecommerceplatform.CartService.Exception.ProductUnavailableException;
 import com.example.ecommerceplatform.CartService.Repository.CartItemRepository;
@@ -24,6 +30,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -33,8 +40,8 @@ public class CartServiceImpl implements CartService {
 
     private final CartRepository cartRepository;
     private final CartItemRepository cartItemRepository;
-    private final ProductServiceClient productServiceClient;
     private final MerchantServiceClient merchantServiceClient;
+    private final OrderServiceClient orderServiceClient;
 
     @Override
     @Transactional(readOnly = true)
@@ -52,29 +59,20 @@ public class CartServiceImpl implements CartService {
     public CartResponseDto addItemToCart(UUID userId, AddCartItemRequestDto request) {
         Carts cart = getOrCreateActiveCart(userId);
 
-        ProductDetailsResponse product = productServiceClient.getProductDetails(
-                request.getProductId(), request.getVariantId());
-        if (!product.isAvailable()) {
-            throw new ProductUnavailableException(request.getProductId());
-        }
-
-        CartItems existingLine = cartItemRepository.findMatchingLine(
+        CartItems existingLine = cartItemRepository.findByCartCartIdAndProductIdAndVariantIdAndMerchantId(
                 cart.getCartId(), request.getProductId(), request.getVariantId(), request.getMerchantId()
         ).orElse(null);
 
         int alreadyInCart = existingLine == null ? 0 : existingLine.getQuantity();
         int requestedTotalQuantity = alreadyInCart + request.getQuantity();
 
-        StockPriceResponse stock = merchantServiceClient.getStockAndPrice(
+        MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
                 request.getMerchantId(), request.getProductId(), request.getVariantId());
-        if (!stock.isInStock() || stock.getAvailableStock() < requestedTotalQuantity) {
-            int available = stock.getAvailableStock() == null ? 0 : stock.getAvailableStock();
-            throw new InsufficientStockException(request.getProductId(), requestedTotalQuantity, available);
-        }
+        requireSellable(merchantItem, requestedTotalQuantity);
 
         if (existingLine != null) {
             existingLine.setQuantity(requestedTotalQuantity);
-            existingLine.setUnitPrice(stock.getPrice());
+            existingLine.setUnitPrice(merchantItem.getPrice());
             cartItemRepository.save(existingLine);
         } else {
             CartItems newLine = CartItems.builder()
@@ -83,9 +81,42 @@ public class CartServiceImpl implements CartService {
                     .variantId(request.getVariantId())
                     .merchantId(request.getMerchantId())
                     .quantity(request.getQuantity())
-                    .unitPrice(stock.getPrice())
+                    .unitPrice(merchantItem.getPrice())
                     .build();
             cartItemRepository.save(newLine);
+        }
+
+        List<CartItems> items = cartItemRepository.findByCartCartId(cart.getCartId());
+        return toCartResponse(cart, items);
+    }
+
+    @Override
+    @Transactional
+    public CartResponseDto patchItemQuantity(UUID userId, UUID cartItemId, PatchCartItemQuantityRequestDto request) {
+        Carts cart = requireActiveCart(userId);
+
+        CartItems item = cartItemRepository.findById(cartItemId)
+                .orElseThrow(() -> new CartItemNotFoundException(cartItemId));
+        if (!item.getCart().getCartId().equals(cart.getCartId())) {
+            throw new CartItemNotFoundException(cartItemId);
+        }
+
+        int delta = request.getDelta();
+        int newQuantity = item.getQuantity() + delta;
+
+        if (newQuantity <= 0) {
+            cartItemRepository.delete(item);
+        } else if (delta > 0) {
+            MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
+                    item.getMerchantId(), item.getProductId(), item.getVariantId());
+            requireSellable(merchantItem, newQuantity);
+
+            item.setQuantity(newQuantity);
+            item.setUnitPrice(merchantItem.getPrice());
+            cartItemRepository.save(item);
+        } else {
+            item.setQuantity(newQuantity);
+            cartItemRepository.save(item);
         }
 
         List<CartItems> items = cartItemRepository.findByCartCartId(cart.getCartId());
@@ -138,6 +169,62 @@ public class CartServiceImpl implements CartService {
                 .build();
     }
 
+    @Override
+    @Transactional
+    public CheckoutResponseDto checkout(UUID userId) {
+        Carts cart = requireActiveCart(userId);
+
+        List<CartItems> items = cartItemRepository.findByCartCartId(cart.getCartId());
+        if (items.isEmpty()) {
+            throw new EmptyCartException(userId);
+        }
+
+        List<OrderLineItemRequest> orderLines = new ArrayList<>();
+        BigDecimal totalPrice = BigDecimal.ZERO;
+
+        for (CartItems item : items) {
+            MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
+                    item.getMerchantId(), item.getProductId(), item.getVariantId());
+            requireSellable(merchantItem, item.getQuantity());
+
+            // Re-priced at checkout time in case the merchant changed price since it was added to the cart.
+            item.setUnitPrice(merchantItem.getPrice());
+            cartItemRepository.save(item);
+
+            BigDecimal lineTotal = merchantItem.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+            totalPrice = totalPrice.add(lineTotal);
+
+            orderLines.add(OrderLineItemRequest.builder()
+                    .productId(item.getProductId())
+                    .variantId(item.getVariantId())
+                    .merchantId(item.getMerchantId())
+                    .quantity(item.getQuantity())
+                    .unitPrice(merchantItem.getPrice())
+                    .lineTotal(lineTotal)
+                    .build());
+        }
+
+        CreateOrderRequest orderRequest = CreateOrderRequest.builder()
+                .cartId(cart.getCartId())
+                .userId(userId)
+                .items(orderLines)
+                .totalPrice(totalPrice)
+                .build();
+
+        OrderCreatedResponse orderResponse = orderServiceClient.createOrder(orderRequest);
+
+        cart.setStatus(CartStatus.CHECKED_OUT);
+        cartRepository.save(cart);
+
+        return CheckoutResponseDto.builder()
+                .orderId(orderResponse.getOrderId())
+                .cartId(cart.getCartId())
+                .userId(userId)
+                .itemCount(items.size())
+                .totalPrice(totalPrice)
+                .build();
+    }
+
     private Carts getOrCreateActiveCart(UUID userId) {
         Carts cart = cartRepository.findByUserIdAndStatus(userId, CartStatus.ACTIVE);
         if (cart != null) {
@@ -156,6 +243,22 @@ public class CartServiceImpl implements CartService {
             throw new CartNotFoundException(userId);
         }
         return cart;
+    }
+
+    /**
+     * DELISTED means the merchant pulled this exact listing (unrecoverable for this cart line);
+     * OUT_OF_STOCK and an ACTIVE listing with too few units are both quantity problems the user
+     * can retry with fewer units — kept as two distinct exceptions for that reason.
+     */
+
+    private void requireSellable(MerchantItemResponse merchantItem, int requestedQuantity) {
+        if (merchantItem.getStatus() == MerchantItemStatus.DELISTED) {
+            throw new ProductUnavailableException(merchantItem.getProductId());
+        }
+        int availableStock = merchantItem.getAvailableStock() == null ? 0 : merchantItem.getAvailableStock();
+        if (merchantItem.getStatus() == MerchantItemStatus.OUT_OF_STOCK || availableStock < requestedQuantity) {
+            throw new InsufficientStockException(merchantItem.getProductId(), requestedQuantity, availableStock);
+        }
     }
 
     private CartResponseDto emptyCartResponse(UUID userId) {
@@ -194,13 +297,13 @@ public class CartServiceImpl implements CartService {
         String productImage = null;
         boolean available = false;
         try {
-            ProductDetailsResponse product = productServiceClient.getProductDetails(
-                    item.getProductId(), item.getVariantId());
-            productName = product.getName();
-            productImage = product.getImageUrl();
-            available = product.isAvailable();
+            MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
+                    item.getMerchantId(), item.getProductId(), item.getVariantId());
+            productName = merchantItem.getProductName();
+            productImage = merchantItem.getProductImage();
+            available = merchantItem.getStatus() == MerchantItemStatus.ACTIVE;
         } catch (DownstreamServiceUnavailableException ignored) {
-            // Product Service is down/unreachable: show the cart with stored data, degrade display fields only.
+            // Merchant Service is down/unreachable: show the cart with stored data, degrade display fields only.
         }
 
         return CartItemResponseDto.builder()
