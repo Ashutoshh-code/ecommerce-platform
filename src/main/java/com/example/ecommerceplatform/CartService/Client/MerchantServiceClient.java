@@ -1,17 +1,15 @@
 package com.example.ecommerceplatform.CartService.Client;
 
-import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemResponse;
+import com.example.ecommerceplatform.CartService.Dto.request.StockAvailabilityRequestDto;
+import com.example.ecommerceplatform.CartService.Dto.response.StockAvailabilityResponseDto;
 import org.springframework.cloud.openfeign.FeignClient;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 
 /**
- * Cart Service's expected contract for Merchant Service.
- * Merchant Service is owned by another team; this interface is the contract Cart Service
- * relies on for both product display data (name, image) and stock/price validation before
- * adding an item to the cart. Falls back to {@link MerchantServiceClientFallback} until
- * it is reachable.
+ * Cart Service's contract for Merchant Service's real stock endpoint
+ * (StockController#checkAvailability — POST /api/internal/stock/availability).
+ * Falls back to {@link MerchantServiceClientFallback} until it is reachable.
  */
 @FeignClient(
         name = "merchant-service",
@@ -20,10 +18,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 )
 public interface MerchantServiceClient {
 
-    @GetMapping("/api/merchants/{merchantId}/products/{productId}/stock")
-    MerchantItemResponse getItemDetails(
-            @PathVariable("merchantId") String merchantId,
-            @PathVariable("productId") String productId,
-            @RequestParam("variantId") String variantId
-    );
+    @PostMapping("/api/internal/stock/availability")
+    StockAvailabilityResponseDto checkAvailability(@RequestBody StockAvailabilityRequestDto request);
 }

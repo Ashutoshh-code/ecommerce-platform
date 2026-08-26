@@ -11,10 +11,10 @@ import com.example.ecommerceplatform.CartService.Dto.CheckoutResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.PatchCartItemQuantityRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.request.CreateOrderRequest;
 import com.example.ecommerceplatform.CartService.Dto.request.OrderLineItemRequest;
-import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemResponse;
-import com.example.ecommerceplatform.CartService.Dto.response.MerchantItemStatus;
+import com.example.ecommerceplatform.CartService.Dto.request.StockAvailabilityRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.response.OrderCreatedResponse;
 import com.example.ecommerceplatform.CartService.Dto.response.ProductImageResponse;
+import com.example.ecommerceplatform.CartService.Dto.response.StockAvailabilityResponseDto;
 import com.example.ecommerceplatform.CartService.Entity.CartItems;
 import com.example.ecommerceplatform.CartService.Entity.CartStatus;
 import com.example.ecommerceplatform.CartService.Entity.Carts;
@@ -23,7 +23,6 @@ import com.example.ecommerceplatform.CartService.Exception.CartNotFoundException
 import com.example.ecommerceplatform.CartService.Exception.DownstreamServiceUnavailableException;
 import com.example.ecommerceplatform.CartService.Exception.EmptyCartException;
 import com.example.ecommerceplatform.CartService.Exception.InsufficientStockException;
-import com.example.ecommerceplatform.CartService.Exception.ProductUnavailableException;
 import com.example.ecommerceplatform.CartService.Repository.CartItemRepository;
 import com.example.ecommerceplatform.CartService.Repository.CartRepository;
 import com.example.ecommerceplatform.CartService.Service.CartService;
@@ -69,13 +68,17 @@ public class CartServiceImpl implements CartService {
         int alreadyInCart = existingLine == null ? 0 : existingLine.getQuantity();
         int requestedTotalQuantity = alreadyInCart + request.getQuantity();
 
-        MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
-                request.getMerchantId(), request.getProductId(), request.getVariantId());
-        requireSellable(merchantItem, requestedTotalQuantity);
+        StockAvailabilityResponseDto availability = merchantServiceClient.checkAvailability(
+                StockAvailabilityRequestDto.builder()
+                        .merchantId(request.getMerchantId())
+                        .variantId(request.getVariantId())
+                        .quantity(requestedTotalQuantity)
+                        .build());
+        requireSellable(availability, request.getProductId());
 
         if (existingLine != null) {
             existingLine.setQuantity(requestedTotalQuantity);
-            existingLine.setUnitPrice(merchantItem.getPrice());
+            existingLine.setUnitPrice(availability.getPrice());
             cartItemRepository.save(existingLine);
         } else {
             CartItems newLine = CartItems.builder()
@@ -84,7 +87,7 @@ public class CartServiceImpl implements CartService {
                     .variantId(request.getVariantId())
                     .merchantId(request.getMerchantId())
                     .quantity(request.getQuantity())
-                    .unitPrice(merchantItem.getPrice())
+                    .unitPrice(availability.getPrice())
                     .build();
             cartItemRepository.save(newLine);
         }
@@ -110,12 +113,16 @@ public class CartServiceImpl implements CartService {
         if (newQuantity <= 0) {
             cartItemRepository.delete(item);
         } else if (delta > 0) {
-            MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
-                    item.getMerchantId(), item.getProductId(), item.getVariantId());
-            requireSellable(merchantItem, newQuantity);
+            StockAvailabilityResponseDto availability = merchantServiceClient.checkAvailability(
+                    StockAvailabilityRequestDto.builder()
+                            .merchantId(item.getMerchantId())
+                            .variantId(item.getVariantId())
+                            .quantity(newQuantity)
+                            .build());
+            requireSellable(availability, item.getProductId());
 
             item.setQuantity(newQuantity);
-            item.setUnitPrice(merchantItem.getPrice());
+            item.setUnitPrice(availability.getPrice());
             cartItemRepository.save(item);
         } else {
             item.setQuantity(newQuantity);
@@ -186,15 +193,19 @@ public class CartServiceImpl implements CartService {
         BigDecimal totalPrice = BigDecimal.ZERO;
 
         for (CartItems item : items) {
-            MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
-                    item.getMerchantId(), item.getProductId(), item.getVariantId());
-            requireSellable(merchantItem, item.getQuantity());
+            StockAvailabilityResponseDto availability = merchantServiceClient.checkAvailability(
+                    StockAvailabilityRequestDto.builder()
+                            .merchantId(item.getMerchantId())
+                            .variantId(item.getVariantId())
+                            .quantity(item.getQuantity())
+                            .build());
+            requireSellable(availability, item.getProductId());
 
             // Re-priced at checkout time in case the merchant changed price since it was added to the cart.
-            item.setUnitPrice(merchantItem.getPrice());
+            item.setUnitPrice(availability.getPrice());
             cartItemRepository.save(item);
 
-            BigDecimal lineTotal = merchantItem.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+            BigDecimal lineTotal = availability.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
             totalPrice = totalPrice.add(lineTotal);
 
             orderLines.add(OrderLineItemRequest.builder()
@@ -202,7 +213,7 @@ public class CartServiceImpl implements CartService {
                     .variantId(item.getVariantId())
                     .merchantId(item.getMerchantId())
                     .quantity(item.getQuantity())
-                    .unitPrice(merchantItem.getPrice())
+                    .unitPrice(availability.getPrice())
                     .lineTotal(lineTotal)
                     .build());
         }
@@ -248,19 +259,10 @@ public class CartServiceImpl implements CartService {
         return cart;
     }
 
-    /**
-     * DELISTED means the merchant pulled this exact listing (unrecoverable for this cart line);
-     * OUT_OF_STOCK and an ACTIVE listing with too few units are both quantity problems the user
-     * can retry with fewer units — kept as two distinct exceptions for that reason.
-     */
-
-    private void requireSellable(MerchantItemResponse merchantItem, int requestedQuantity) {
-        if (merchantItem.getStatus() == MerchantItemStatus.DELISTED) {
-            throw new ProductUnavailableException(merchantItem.getProductId());
-        }
-        int availableStock = merchantItem.getAvailableStock() == null ? 0 : merchantItem.getAvailableStock();
-        if (merchantItem.getStatus() == MerchantItemStatus.OUT_OF_STOCK || availableStock < requestedQuantity) {
-            throw new InsufficientStockException(merchantItem.getProductId(), requestedQuantity, availableStock);
+    private void requireSellable(StockAvailabilityResponseDto availability, String productId) {
+        if (!availability.isAvailable()) {
+            int availableQuantity = availability.getAvailableQuantity() == null ? 0 : availability.getAvailableQuantity();
+            throw new InsufficientStockException(productId, availability.getRequestedQuantity(), availableQuantity);
         }
     }
 
@@ -296,13 +298,18 @@ public class CartServiceImpl implements CartService {
     private CartItemResponseDto toCartItemResponse(CartItems item) {
         BigDecimal lineTotal = item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
 
-        String productName = "Unavailable";
+        // NOTE: Merchant Service's stock endpoint doesn't return a product name, so this is
+        // left unset (null) until a real name source (likely Product Service) is confirmed.
+        String productName = null;
         boolean available = false;
         try {
-            MerchantItemResponse merchantItem = merchantServiceClient.getItemDetails(
-                    item.getMerchantId(), item.getProductId(), item.getVariantId());
-            productName = merchantItem.getProductName();
-            available = merchantItem.getStatus() == MerchantItemStatus.ACTIVE;
+            StockAvailabilityResponseDto availability = merchantServiceClient.checkAvailability(
+                    StockAvailabilityRequestDto.builder()
+                            .merchantId(item.getMerchantId())
+                            .variantId(item.getVariantId())
+                            .quantity(item.getQuantity())
+                            .build());
+            available = availability.isAvailable();
         } catch (DownstreamServiceUnavailableException ignored) {
             // Merchant Service is down/unreachable: show the cart with stored data, degrade display fields only.
         }
