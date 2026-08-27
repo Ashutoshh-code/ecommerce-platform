@@ -7,15 +7,16 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 
 /**
- * Cart Service's expected contract for Order Service.
- * Order Service is owned by another team; this interface is the contract Cart Service
- * relies on to hand off a validated, priced cart at checkout.
- * Falls back to {@link OrderServiceClientFallback} until it is reachable.
+ * Cart Service's contract for Order Service (OrderController#createOrder —
+ * POST /api/orders). Falls back via {@link OrderServiceClientFallbackFactory}, which
+ * distinguishes a rejected order (400 — validation/total-mismatch/invalid-order-details)
+ * and a duplicate checkout (409 — an order already exists for this cart) from Order
+ * Service actually being unreachable.
  */
 @FeignClient(
         name = "order-service",
         url = "${clients.order-service.url}",
-        fallback = OrderServiceClientFallback.class
+        fallbackFactory = OrderServiceClientFallbackFactory.class
 )
 public interface OrderServiceClient {
 
