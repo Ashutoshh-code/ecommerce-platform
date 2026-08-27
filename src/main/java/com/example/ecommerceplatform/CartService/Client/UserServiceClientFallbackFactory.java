@@ -1,5 +1,6 @@
 package com.example.ecommerceplatform.CartService.Client;
 
+import com.example.ecommerceplatform.CartService.Dto.request.AddressRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.response.AddressResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.response.UserDetailsResponse;
 import com.example.ecommerceplatform.CartService.Exception.AddressNotFoundException;
@@ -33,6 +34,14 @@ public class UserServiceClientFallbackFactory implements FallbackFactory<UserSer
             public AddressResponseDto getDefaultAddress(UUID userId) {
                 if (cause instanceof FeignException fe && fe.status() == 404) {
                     throw new AddressNotFoundException(userId);
+                }
+                throw new DownstreamServiceUnavailableException("User Service", cause);
+            }
+
+            @Override
+            public AddressResponseDto createAddress(UUID userId, AddressRequestDto request) {
+                if (cause instanceof FeignException fe && fe.status() == 404) {
+                    throw new UserNotFoundException(userId);
                 }
                 throw new DownstreamServiceUnavailableException("User Service", cause);
             }

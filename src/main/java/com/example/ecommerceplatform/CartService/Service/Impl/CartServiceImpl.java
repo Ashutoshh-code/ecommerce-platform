@@ -5,12 +5,19 @@ import com.example.ecommerceplatform.CartService.Client.OrderServiceClient;
 import com.example.ecommerceplatform.CartService.Client.ProductServiceClient;
 import com.example.ecommerceplatform.CartService.Client.UserServiceClient;
 import com.example.ecommerceplatform.CartService.Dto.AddCartItemRequestDto;
+import com.example.ecommerceplatform.CartService.Dto.BuyNowResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemCountResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartItemResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.CartResponseDto;
+import com.example.ecommerceplatform.CartService.Dto.CartValidationResponseDto;
+import com.example.ecommerceplatform.CartService.Dto.ChangedPriceItemDto;
+import com.example.ecommerceplatform.CartService.Dto.CheckoutAddressRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.CheckoutResponseDto;
 import com.example.ecommerceplatform.CartService.Dto.PatchCartItemQuantityRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.PatchCartItemQuantityResponseDto;
+import com.example.ecommerceplatform.CartService.Dto.UnavailableCartItemDto;
+import com.example.ecommerceplatform.CartService.Dto.ValidatedCartItemDto;
+import com.example.ecommerceplatform.CartService.Dto.request.AddressRequestDto;
 import com.example.ecommerceplatform.CartService.Dto.request.CreateOrderRequest;
 import com.example.ecommerceplatform.CartService.Dto.request.OrderLineItemRequest;
 import com.example.ecommerceplatform.CartService.Dto.request.ReserveStockRequestDto;
@@ -201,11 +208,11 @@ public class CartServiceImpl implements CartService {
 
     @Override
     @Transactional
-    public CheckoutResponseDto checkout(UUID userId) {
+    public CheckoutResponseDto checkout(UUID userId, CheckoutAddressRequestDto customAddress) {
         // Order Service no longer calls User Service itself, so Cart Service fetches and
-        // snapshots the customer's identity and default address here instead.
+        // snapshots the customer's identity and address here instead.
         UserDetailsResponse user = userServiceClient.getUser(userId);
-        AddressResponseDto address = userServiceClient.getDefaultAddress(userId);
+        AddressResponseDto address = resolveAddress(userId, customAddress);
 
         Carts cart = requireActiveCart(userId);
 
@@ -321,6 +328,237 @@ public class CartServiceImpl implements CartService {
                 .build();
     }
 
+    @Override
+    @Transactional(readOnly = true)
+    public CartValidationResponseDto validateCart(UUID userId) {
+        Carts cart = requireActiveCart(userId);
+
+        List<CartItems> items = cartItemRepository.findByCartCartId(cart.getCartId());
+        if (items.isEmpty()) {
+            throw new EmptyCartException(userId);
+        }
+
+        List<UnavailableCartItemDto> delisted = new ArrayList<>();
+        List<UnavailableCartItemDto> outOfStock = new ArrayList<>();
+        List<ChangedPriceItemDto> priceChanged = new ArrayList<>();
+        List<ValidatedCartItemDto> validItems = new ArrayList<>();
+        BigDecimal subtotal = BigDecimal.ZERO;
+
+        for (CartItems item : items) {
+            StockAvailabilityResponseDto availability;
+            try {
+                availability = merchantServiceClient.checkAvailability(
+                        StockAvailabilityRequestDto.builder()
+                                .merchantId(item.getMerchantId())
+                                .variantId(item.getVariantId())
+                                .quantity(item.getQuantity())
+                                .build());
+            } catch (ProductUnavailableException ex) {
+                // No listing at all for this merchant+variant: the merchant delisted it.
+                delisted.add(UnavailableCartItemDto.builder()
+                        .cartItemId(item.getId())
+                        .productId(item.getProductId())
+                        .merchantId(item.getMerchantId())
+                        .build());
+                continue;
+            }
+
+            int availableStock = availability.getAvailableQuantity() == null ? 0 : availability.getAvailableQuantity();
+            if (!availability.isAvailable() || availableStock < item.getQuantity()) {
+                outOfStock.add(UnavailableCartItemDto.builder()
+                        .cartItemId(item.getId())
+                        .productId(item.getProductId())
+                        .merchantId(item.getMerchantId())
+                        .requestedQuantity(item.getQuantity())
+                        .availableStock(availableStock)
+                        .build());
+                continue;
+            }
+
+            if (availability.getPrice().compareTo(item.getUnitPrice()) != 0) {
+                priceChanged.add(ChangedPriceItemDto.builder()
+                        .cartItemId(item.getId())
+                        .oldPrice(item.getUnitPrice())
+                        .currentPrice(availability.getPrice())
+                        .build());
+            }
+
+            String productTitle = null;
+            String productImage = null;
+            try {
+                ProductResponseDto product = productServiceClient.getProduct(item.getProductId());
+                productTitle = product.getName();
+                productImage = product.getThumbnail();
+            } catch (DownstreamServiceUnavailableException | ProductNotFoundException ignored) {
+                // Same best-effort degrade as GET cart: display fields only, never blocking.
+            }
+
+            BigDecimal lineTotal = availability.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+            subtotal = subtotal.add(lineTotal);
+
+            validItems.add(ValidatedCartItemDto.builder()
+                    .cartItemId(item.getId())
+                    .productId(item.getProductId())
+                    .merchantId(item.getMerchantId())
+                    .productTitle(productTitle)
+                    .productImage(productImage)
+                    .price(availability.getPrice())
+                    .quantity(item.getQuantity())
+                    .availableStock(availableStock)
+                    .totalPrice(lineTotal)
+                    .build());
+        }
+
+        // Priority order: delisted items block first, then stock, then price — the frontend
+        // fixes one category and re-validates, surfacing the next category if any remains.
+        if (!delisted.isEmpty()) {
+            return CartValidationResponseDto.builder()
+                    .valid(false)
+                    .code("OFFER_UNAVAILABLE")
+                    .message("Merchant is no longer selling one or more products in your cart")
+                    .unavailableItems(delisted)
+                    .build();
+        }
+        if (!outOfStock.isEmpty()) {
+            return CartValidationResponseDto.builder()
+                    .valid(false)
+                    .code("INSUFFICIENT_STOCK")
+                    .message("Some products have insufficient stock")
+                    .unavailableItems(outOfStock)
+                    .build();
+        }
+        if (!priceChanged.isEmpty()) {
+            return CartValidationResponseDto.builder()
+                    .valid(false)
+                    .code("PRICE_CHANGED")
+                    .message("Product price has changed")
+                    .changedItems(priceChanged)
+                    .build();
+        }
+
+        return CartValidationResponseDto.builder()
+                .valid(true)
+                .items(validItems)
+                .subtotal(subtotal)
+                .build();
+    }
+
+    @Override
+    @Transactional
+    public BuyNowResponseDto buyNow(UUID userId, AddCartItemRequestDto request) {
+        CartResponseDto cart = addItemToCart(userId, request);
+
+        UUID cartItemId = cart.getItems().stream()
+                .filter(item -> item.getProductId().equals(request.getProductId())
+                        && item.getVariantId().equals(request.getVariantId())
+                        && item.getMerchantId().equals(request.getMerchantId()))
+                .map(CartItemResponseDto::getCartItemId)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("Item just added to cart could not be found"));
+
+        return BuyNowResponseDto.builder()
+                .cartItemId(cartItemId)
+                .build();
+    }
+
+    @Override
+    @Transactional
+    public CheckoutResponseDto checkoutItem(UUID userId, UUID cartItemId, CheckoutAddressRequestDto customAddress) {
+        UserDetailsResponse user = userServiceClient.getUser(userId);
+        AddressResponseDto address = resolveAddress(userId, customAddress);
+
+        Carts cart = requireActiveCart(userId);
+        CartItems item = cartItemRepository.findById(cartItemId)
+                .orElseThrow(() -> new CartItemNotFoundException(cartItemId));
+        if (!item.getCart().getCartId().equals(cart.getCartId())) {
+            throw new CartItemNotFoundException(cartItemId);
+        }
+
+        List<ReserveStockRequestDto> reservedSoFar = new ArrayList<>();
+        StockAvailabilityResponseDto availability;
+        ProductResponseDto product;
+
+        try {
+            availability = merchantServiceClient.checkAvailability(
+                    StockAvailabilityRequestDto.builder()
+                            .merchantId(item.getMerchantId())
+                            .variantId(item.getVariantId())
+                            .quantity(item.getQuantity())
+                            .build());
+            requireSellable(availability, item.getProductId());
+
+            ReserveStockRequestDto reserveRequest = ReserveStockRequestDto.builder()
+                    .merchantId(item.getMerchantId())
+                    .variantId(item.getVariantId())
+                    .quantity(item.getQuantity())
+                    .build();
+            StockReservationResponseDto reservation = merchantServiceClient.reserveStock(reserveRequest);
+            requireReserved(reservation, item.getProductId());
+            reservedSoFar.add(reserveRequest);
+
+            product = productServiceClient.getProduct(item.getProductId());
+        } catch (InsufficientStockException | ProductUnavailableException | ProductNotFoundException
+                 | DownstreamServiceUnavailableException ex) {
+            releaseAll(reservedSoFar);
+            throw ex;
+        }
+
+        BigDecimal lineTotal = availability.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+
+        OrderLineItemRequest orderLine = OrderLineItemRequest.builder()
+                .cartItemId(item.getId())
+                .productId(item.getProductId())
+                .variantId(item.getVariantId())
+                .merchantId(item.getMerchantId())
+                .productName(product.getName())
+                .imageUrl(product.getThumbnail())
+                .quantity(item.getQuantity())
+                .unitPrice(availability.getPrice())
+                .lineTotal(lineTotal)
+                .build();
+
+        // This checks out just ONE item while the rest of the cart stays untouched, so the
+        // real cart's own cartId can't be used here: Order Service allows only one order per
+        // cartId ever, and a later full checkout of the remaining items would reuse that same
+        // real cartId and get rejected as a duplicate. A fresh random UUID avoids that trap.
+        CreateOrderRequest orderRequest = CreateOrderRequest.builder()
+                .cartId(UUID.randomUUID())
+                .userId(userId)
+                .email(user.getEmail())
+                .firstName(user.getFirstName())
+                .lastName(user.getLastName())
+                .shippingAddress(ShippingAddressRequest.builder()
+                        .addressLine1(address.getAddressLine1())
+                        .addressLine2(address.getAddressLine2())
+                        .city(address.getCity())
+                        .state(address.getState())
+                        .country(address.getCountry())
+                        .pincode(address.getPincode())
+                        .build())
+                .items(List.of(orderLine))
+                .totalPrice(lineTotal)
+                .build();
+
+        OrderCreatedResponse orderResponse;
+        try {
+            orderResponse = orderServiceClient.createOrder(orderRequest);
+        } catch (DownstreamServiceUnavailableException | OrderCreationFailedException | DuplicateOrderException ex) {
+            releaseAll(reservedSoFar);
+            throw ex;
+        }
+
+        // Only this one item is removed — the cart itself stays ACTIVE since other items may remain.
+        cartItemRepository.delete(item);
+
+        return CheckoutResponseDto.builder()
+                .orderId(orderResponse.getId())
+                .cartId(cart.getCartId())
+                .userId(userId)
+                .itemCount(item.getQuantity())
+                .totalPrice(lineTotal)
+                .build();
+    }
+
     private Carts getOrCreateActiveCart(UUID userId) {
         Carts cart = cartRepository.findByUserIdAndStatus(userId, CartStatus.ACTIVE);
         if (cart != null) {
@@ -339,6 +577,37 @@ public class CartServiceImpl implements CartService {
             throw new CartNotFoundException(userId);
         }
         return cart;
+    }
+
+    /**
+     * When the checkout caller supplies their own address, it's saved as a new (non-default)
+     * entry in their address book and used directly — no need to re-fetch it from User
+     * Service afterward, since we already have every field from the request. Otherwise falls
+     * back to whatever User Service has on file as their default.
+     */
+    private AddressResponseDto resolveAddress(UUID userId, CheckoutAddressRequestDto customAddress) {
+        if (customAddress == null) {
+            return userServiceClient.getDefaultAddress(userId);
+        }
+
+        userServiceClient.createAddress(userId, AddressRequestDto.builder()
+                .addressLine1(customAddress.getAddressLine1())
+                .addressLine2(customAddress.getAddressLine2())
+                .city(customAddress.getCity())
+                .state(customAddress.getState())
+                .country(customAddress.getCountry())
+                .pincode(customAddress.getPincode())
+                .isDefault(false)
+                .build());
+
+        return AddressResponseDto.builder()
+                .addressLine1(customAddress.getAddressLine1())
+                .addressLine2(customAddress.getAddressLine2())
+                .city(customAddress.getCity())
+                .state(customAddress.getState())
+                .country(customAddress.getCountry())
+                .pincode(customAddress.getPincode())
+                .build();
     }
 
     private void requireSellable(StockAvailabilityResponseDto availability, String productId) {
